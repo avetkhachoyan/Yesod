@@ -1,5 +1,5 @@
+const ADDRESSES = require('../helper/coreAssets.json')
 const { staking } = require('../helper/staking')
-const { sumTokens2, nullAddress } = require('../helper/unwrapLPs')
 
 module.exports = {
   bsc: {
@@ -8,6 +8,8 @@ module.exports = {
   },
   bitindi: {
     tvl: () => ({}),
-    staking: staking('0x140c312c8841B0a7152946C0Bc2BD343bA51bbcc', '0x15E162205421dc3A47b15A1A740FbF5EAbB77921', 'bitindi'),
+    staking: () => ({}),
+    // staking: staking('0x140c312c8841B0a7152946C0Bc2BD343bA51bbcc', ADDRESSES.bitindi.WBNI, 'bitindi'),
   },
+  // deadFrom: '2023-12-20',
 };

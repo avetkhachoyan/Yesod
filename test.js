@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+
+const { ENV_KEYS } = require("./projects/helper/env");
 const path = require("path");
 require("dotenv").config();
 const { util: {
@@ -13,6 +15,16 @@ const handleError = require('./utils/handleError')
 const { log, diplayUnknownTable, sliceIntoChunks } = require('./projects/helper/utils')
 const { normalizeAddress } = require('./projects/helper/tokenMapping')
 const { PromisePool } = require('@supercharge/promise-pool')
+
+const currentCacheVersion = sdk.cache.currentVersion // load env for cache
+// console.log(`Using cache version ${currentCacheVersion}`)
+
+if (process.env.LLAMA_SANITIZE)
+  Object.keys(process.env).forEach((key) => {
+    if (key.endsWith('_RPC')) return;
+    if (['TVL_LOCAL_CACHE_ROOT_FOLDER', 'LLAMA_DEBUG_MODE', ...ENV_KEYS].includes(key) || key.includes('SDK')) return;
+    delete process.env[key]
+  })
 
 const locks = [];
 function getCoingeckoLock() {
@@ -49,7 +61,8 @@ async function getTvl(
     const chain = storedKey.split('-')[0]
     const block = chainBlocks[chain]
     const api = new sdk.ChainApi({ chain, block: chainBlocks[chain], timestamp: unixTimestamp, })
-    const tvlBalances = await tvlFunction(unixTimestamp, ethBlock, chainBlocks, { api, chain, block, storedKey });
+    let tvlBalances = await tvlFunction(unixTimestamp, ethBlock, chainBlocks, { api, chain, block, storedKey });
+    if (!tvlBalances && Object.keys(api.getBalances()).length) tvlBalances = api.getBalances()
     const tvlResults = await computeTVL(
       tvlBalances,
       "now",
@@ -235,7 +248,7 @@ function checkExportKeys(module, filePath, chains) {
     || (filePath.length === 1 && !['.js', ''].includes(path.extname(filePath[0]))) // matches .../projects/projectXYZ.js or .../projects/projectXYZ
     || (filePath.length === 2 &&
       !(['api.js', 'index.js', 'apiCache.js',].includes(filePath[1])  // matches .../projects/projectXYZ/index.js
-        || ['treasury',].includes(filePath[0])  // matches .../projects/treasury/project.js
+        || ['treasury', 'entities'].includes(filePath[0])  // matches .../projects/treasury/project.js
       )))
     process.exit(0)
 
@@ -307,8 +320,8 @@ const axios = require("axios");
 
 const ethereumAddress = "0x0000000000000000000000000000000000000000";
 const weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-
 function fixBalances(balances) {
+
   Object.entries(balances).forEach(([token, value]) => {
     let newKey
     if (token.startsWith("0x")) newKey = `ethereum:${token}`
@@ -353,16 +366,14 @@ async function computeTVL(balances, timestamp) {
     })
     .filter((item) => item !== undefined);
 
-  const burl = "https://coins.llama.fi/prices/current/";
   const unknownTokens = {}
   let tokenData = []
   readKeys.forEach(i => unknownTokens[i] = true)
 
   const { errors } = await PromisePool.withConcurrency(5)
-    .for(sliceIntoChunks(readKeys, 40))
+    .for(sliceIntoChunks(readKeys, 100))
     .process(async (keys) => {
-      const coins = keys.join(',');
-      tokenData.push((await axios.get(`${burl}${coins}`)).data.coins)
+      tokenData.push((await axios.get(`https://coins.llama.fi/prices/current/${keys.join(',')}`)).data.coins)
     })
 
   if (errors && errors.length)
@@ -379,7 +390,11 @@ async function computeTVL(balances, timestamp) {
       const balance = balances[address];
 
       if (data == undefined) tokenBalances[`UNKNOWN (${address})`] = balance
-      if ('confidence' in data && data.confidence < confidenceThreshold) return
+      if ('confidence' in data && data.confidence < confidenceThreshold || !data.price) return
+      if (Math.abs(data.timestamp - Date.now() / 1e3) > (24 * 3600)) {
+        console.log(`Price for ${address} is stale, ignoring...`)
+        return
+      }
 
       let amount, usdAmount;
       if (address.includes(":") && !address.startsWith("coingecko:")) {
@@ -399,10 +414,17 @@ Warning: `)
       tokenBalances[data.symbol] = (tokenBalances[data.symbol] ?? 0) + amount;
       usdTokenBalances[data.symbol] = (usdTokenBalances[data.symbol] ?? 0) + usdAmount;
       usdTvl += usdAmount;
+      if (isNaN(usdTvl)) {
+        throw new Error(`NaN usdTvl for ${address} with balance ${balance} and price ${data.price}`)
+      }
     })
   });
 
   Object.keys(unknownTokens).forEach(address => tokenBalances[`UNKNOWN (${address})`] = balances[address])
+
+
+  // console.log('--------token balances-------')
+  // console.table(tokenBalances)
 
   return {
     usdTvl,
@@ -410,3 +432,9 @@ Warning: `)
     usdTokenBalances,
   };
 }
+
+setTimeout(() => {
+  console.log("Timeout reached, exiting...");
+  if (!process.env.NO_EXIT_ON_LONG_RUN_RPC)
+    process.exit(1);
+}, 10 * 60 * 1000) // 10 minutes
